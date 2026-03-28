@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="CustomCharts/CustomCharts.csproj" Id="ac9cb2f1-2b76-48d5-bdec-505619ec1720" />
+  <Project Path="TestApp/TestApp.csproj" Id="7bf01ed3-b748-4cb4-8282-134b173aeadf" />
+</Solution>
