@@ -17,6 +17,12 @@
             {
                 components.Dispose();
             }
+
+            if (disposing && (_refreshTimer != null))
+            {
+                _refreshTimer.Dispose();
+            }
+
             base.Dispose(disposing);
         }
 

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Drawing;
 using System.Globalization;
-using System.Linq;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
 
@@ -12,6 +11,7 @@ namespace CustomCharts
     public partial class BaseChartControl : UserControl
     {
         private const int MaxGraphs = 20;
+        private const int RefreshIntervalMs = 200;
 
         private class GraphInfo
         {
@@ -30,7 +30,21 @@ namespace CustomCharts
         }
 
         private readonly Dictionary<string, GraphInfo> _graphs = new Dictionary<string, GraphInfo>(StringComparer.OrdinalIgnoreCase);
+        private readonly Timer _refreshTimer;
         private string _inputString = string.Empty;
+        private string _xAxisTitle;
+        private string _yAxisTitle;
+        private bool _showGrid;
+        private bool _autoScale;
+        private bool _enableZoomX;
+        private bool _enableZoomY;
+        private Color _axisColor = Color.Black;
+        private Color _axisLabelColor = Color.Black;
+        private Color _chartBackColor = Color.White;
+        private Color _plotBackColor = Color.White;
+        private int _transparency = 255;
+        private bool _redrawPending;
+        private bool _isRedrawing;
 
         public BaseChartControl()
         {
@@ -49,8 +63,12 @@ namespace CustomCharts
                 true);
 
             UpdateStyles();
+            _refreshTimer = new Timer { Interval = RefreshIntervalMs };
+            _refreshTimer.Tick += RefreshTimer_Tick;
+
             ApplyAppearance();
-            RedrawChart();
+            _redrawPending = true;
+            RedrawChartNow();
         }
 
         [Browsable(true)]
@@ -67,53 +85,175 @@ namespace CustomCharts
 
         [Browsable(true)]
         [Category("Axes")]
-        public string XAxisTitle { get; set; }
+        public string XAxisTitle
+        {
+            get { return _xAxisTitle; }
+            set
+            {
+                if (_xAxisTitle == value)
+                    return;
+
+                _xAxisTitle = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Axes")]
-        public string YAxisTitle { get; set; }
+        public string YAxisTitle
+        {
+            get { return _yAxisTitle; }
+            set
+            {
+                if (_yAxisTitle == value)
+                    return;
+
+                _yAxisTitle = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Appearance")]
-        public bool ShowGrid { get; set; }
+        public bool ShowGrid
+        {
+            get { return _showGrid; }
+            set
+            {
+                if (_showGrid == value)
+                    return;
+
+                _showGrid = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Behavior")]
-        public bool AutoScale { get; set; }
+        public bool AutoScale
+        {
+            get { return _autoScale; }
+            set
+            {
+                if (_autoScale == value)
+                    return;
+
+                _autoScale = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Behavior")]
-        public bool EnableZoomX { get; set; }
+        public bool EnableZoomX
+        {
+            get { return _enableZoomX; }
+            set
+            {
+                if (_enableZoomX == value)
+                    return;
+
+                _enableZoomX = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Behavior")]
-        public bool EnableZoomY { get; set; }
+        public bool EnableZoomY
+        {
+            get { return _enableZoomY; }
+            set
+            {
+                if (_enableZoomY == value)
+                    return;
+
+                _enableZoomY = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Colors")]
-        public Color AxisColor { get; set; }
+        public Color AxisColor
+        {
+            get { return _axisColor; }
+            set
+            {
+                if (_axisColor == value)
+                    return;
+
+                _axisColor = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Colors")]
-        public Color AxisLabelColor { get; set; }
+        public Color AxisLabelColor
+        {
+            get { return _axisLabelColor; }
+            set
+            {
+                if (_axisLabelColor == value)
+                    return;
+
+                _axisLabelColor = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Colors")]
-        public Color ChartBackColor { get; set; }
+        public Color ChartBackColor
+        {
+            get { return _chartBackColor; }
+            set
+            {
+                if (_chartBackColor == value)
+                    return;
+
+                _chartBackColor = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Colors")]
-        public Color PlotBackColor { get; set; }
+        public Color PlotBackColor
+        {
+            get { return _plotBackColor; }
+            set
+            {
+                if (_plotBackColor == value)
+                    return;
+
+                _plotBackColor = value;
+                ScheduleRedraw();
+            }
+        }
 
         [Browsable(true)]
         [Category("Appearance")]
-        public int Transparency { get; set; }
+        public int Transparency
+        {
+            get { return _transparency; }
+            set
+            {
+                int clampedValue = Math.Max(0, Math.Min(255, value));
+                if (_transparency == clampedValue)
+                    return;
+
+                _transparency = clampedValue;
+                ScheduleRedraw();
+            }
+        }
 
         private void ParseAndApply(string input)
         {
             if (string.IsNullOrWhiteSpace(input))
             {
-                RedrawChart();
+                ScheduleRedraw();
                 return;
             }
 
@@ -141,7 +281,8 @@ namespace CustomCharts
                     else if (part.StartsWith("visible=", StringComparison.OrdinalIgnoreCase))
                     {
                         string visibleValue = part.Substring("visible=".Length).Trim();
-                        if (bool.TryParse(visibleValue, out bool visible))
+                        bool visible;
+                        if (bool.TryParse(visibleValue, out visible))
                             isVisible = visible;
                     }
                     else if (part.StartsWith("name=", StringComparison.OrdinalIgnoreCase))
@@ -159,10 +300,7 @@ namespace CustomCharts
                         {
                             string numbers = part.Substring(start + 1, end - start - 1);
 
-                            data = numbers
-                                .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                                .Select(x => double.Parse(x.Trim(), CultureInfo.InvariantCulture))
-                                .ToList();
+                            data = ParseDataPoints(numbers);
                         }
                     }
                 }
@@ -192,43 +330,139 @@ namespace CustomCharts
                 };
             }
 
-            RedrawChart();
+            ScheduleRedraw();
         }
 
-        private void RedrawChart()
+        private List<double> ParseDataPoints(string numbers)
         {
-            chart1.Series.Clear();
+            var values = new List<double>();
+            string[] parts = numbers.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
 
-            string areaName = chart1.ChartAreas[0].Name;
-            string legendName = chart1.Legends[0].Name;
-
-            foreach (var graph in _graphs.Values)
+            foreach (string rawValue in parts)
             {
-                if (!graph.Visible)
-                    continue;
-
-                var series = new Series(graph.Name)
-                {
-                    ChartType = GetChartType(),
-                    Color = Color.FromArgb(
-                        Math.Max(0, Math.Min(255, Transparency)),
-                        graph.Color),
-                    BorderWidth = 2,
-                    ChartArea = areaName,
-                    Legend = legendName,
-                    IsVisibleInLegend = true
-                };
-
-                for (int i = 0; i < graph.Data.Count; i++)
-                {
-                    series.Points.AddXY(i, graph.Data[i]);
-                }
-
-                chart1.Series.Add(series);
+                double value;
+                if (double.TryParse(rawValue.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+                    values.Add(value);
             }
 
-            ApplyAppearance();
-            chart1.Invalidate();
+            return values;
+        }
+
+        private void RefreshTimer_Tick(object sender, EventArgs e)
+        {
+            _refreshTimer.Stop();
+
+            if (_redrawPending)
+                RedrawChartNow();
+        }
+
+        private void ScheduleRedraw()
+        {
+            if (IsDisposed)
+                return;
+
+            _redrawPending = true;
+
+            if (_isRedrawing)
+                return;
+
+            if (_refreshTimer.Enabled)
+                return;
+
+            _refreshTimer.Start();
+        }
+
+        private void RedrawChartNow()
+        {
+            if (_isRedrawing || !_redrawPending)
+                return;
+
+            _isRedrawing = true;
+            _redrawPending = false;
+            string areaName = chart1.ChartAreas[0].Name;
+            string legendName = chart1.Legends[0].Name;
+            var visibleSeriesNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            chart1.BeginInit();
+            chart1.SuspendLayout();
+
+            try
+            {
+                foreach (var graph in _graphs.Values)
+                {
+                    if (!graph.Visible)
+                        continue;
+
+                    visibleSeriesNames.Add(graph.Name);
+
+                    Series series = chart1.Series.FindByName(graph.Name);
+                    if (series == null)
+                    {
+                        series = new Series(graph.Name);
+                        chart1.Series.Add(series);
+                    }
+
+                    UpdateSeriesSettings(series, graph, areaName, legendName);
+                    UpdateSeriesPoints(series, graph.Data);
+                }
+
+                RemoveUnusedSeries(visibleSeriesNames);
+
+                ApplyAppearance();
+            }
+            finally
+            {
+                chart1.ResumeLayout(false);
+                chart1.EndInit();
+                chart1.Invalidate();
+                _isRedrawing = false;
+
+                if (_redrawPending)
+                    ScheduleRedraw();
+            }
+        }
+
+        private void UpdateSeriesSettings(Series series, GraphInfo graph, string areaName, string legendName)
+        {
+            series.ChartType = GetChartType();
+            series.Color = Color.FromArgb(Transparency, graph.Color);
+            series.BorderWidth = 2;
+            series.ChartArea = areaName;
+            series.Legend = legendName;
+            series.IsVisibleInLegend = true;
+        }
+
+        private void UpdateSeriesPoints(Series series, IList<double> data)
+        {
+            if (series.Points.Count != data.Count)
+            {
+                series.Points.Clear();
+
+                for (int i = 0; i < data.Count; i++)
+                    series.Points.AddXY(i, data[i]);
+
+                return;
+            }
+
+            for (int i = 0; i < data.Count; i++)
+            {
+                DataPoint point = series.Points[i];
+                if (point.XValue != i)
+                    point.XValue = i;
+
+                if (point.YValues.Length == 0 || point.YValues[0] != data[i])
+                    point.SetValueY(data[i]);
+            }
+        }
+
+        private void RemoveUnusedSeries(ISet<string> visibleSeriesNames)
+        {
+            for (int i = chart1.Series.Count - 1; i >= 0; i--)
+            {
+                Series series = chart1.Series[i];
+                if (!visibleSeriesNames.Contains(series.Name))
+                    chart1.Series.RemoveAt(i);
+            }
         }
 
         private void ApplyAppearance()
